@@ -150,12 +150,110 @@ def crawl_cu_official(driver, processed_products):
             
     return cu_products
 
+def crawl_emart24_official(driver, processed_products):
+    print("\n  -- [직접] 이마트24 공식 홈페이지 크롤링 시작")
+    emart_products = []
+    
+    # 이마트24 공식 카테고리 (1:간편식사, 2:과자, 3:생활용품, 5:음료)
+    # 아이스크림은 '과자' 분류 내에서 정밀 추출
+    categories = [
+        {"id": "1", "name": "간편식사"},
+        {"id": "2", "name": "과자"},
+        {"id": "3", "name": "생활용품"},
+        {"id": "5", "name": "음료"},
+        {"id": "", "name": "기타"}
+    ]
+
+    for cat in categories:
+        page = 1
+        print(f"    * 이마트24 '{cat['name'] or '전체'}' 수집 중...", end="")
+        cat_count = 0
+        while True:
+            try:
+                url = f"https://emart24.co.kr/goods/event?search=&category_seq=&base_category_seq={cat['id']}&align=&page={page}"
+                if not safe_get(driver, url): break
+                
+                # 페이지 로딩 대기
+                try:
+                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "itemWrap")))
+                except:
+                    break # 상품 없음
+                
+                items_raw = driver.execute_script("""
+                    let results = [];
+                    document.querySelectorAll('.itemWrap').forEach(function(item) {
+                        let name = "";
+                        let name_el = item.querySelector('.itemtitle p a');
+                        if (name_el) name = name_el.innerText.trim();
+                        
+                        let img = "";
+                        let img_el = item.querySelector('.itemTit img') || item.querySelector('.itemImg img') || item.querySelector('img');
+                        if (img_el) img = img_el.src;
+                        
+                        let event = "";
+                        if (item.querySelector('.onepl')) event = "1+1";
+                        else if (item.querySelector('.twopl')) event = "2+1";
+                        else if (item.querySelector('.tripl')) event = "3+1";
+                        else if (item.querySelector('.sale')) event = "할인";
+                        
+                        if (!event || event.includes('골라') || event.includes('gola')) return;
+                        
+                        let sale_p = "0";
+                        let sale_p_el = item.querySelector('.price');
+                        if (sale_p_el) sale_p = sale_p_el.innerText.trim();
+                        
+                        let orig_p = sale_p;
+                        let orig_p_el = item.querySelector('.priceOff');
+                        if (orig_p_el) orig_p = orig_p_el.innerText.trim();
+                        
+                        results.push({ name: name, img: img, event: event, sale_price: sale_p, original_price: orig_p });
+                    });
+                    return results;
+                """)
+                
+                if not items_raw: break
+                
+                new_in_page = 0
+                for raw in items_raw:
+                    if not raw['name'] or (raw['name'], "이마트24") in processed_products: continue
+                    
+                    try: sale_p = int(raw['sale_price'].replace(',', '').replace('원', '').strip())
+                    except: sale_p = 0
+                    try: orig_p = int(raw['original_price'].replace(',', '').replace('원', '').strip())
+                    except: orig_p = sale_p
+                    
+                    # 사이트 공식 카테고리 이름을 그대로 사용 (보정 로직 제거)
+                    cat_name = cat['name'] or "기타"
+
+                    emart_products.append({
+                        "brand": "이마트24", "name": raw['name'], "sale_price": sale_p, "original_price": orig_p,
+                        "image_url": raw['img'], "category": cat_name, "event_type": raw['event']
+                    })
+                    processed_products.add((raw['name'], "이마트24"))
+                    new_in_page += 1
+                    cat_count += 1
+                
+                if new_in_page == 0: break 
+                page += 1
+                if page > 100: break
+                time.sleep(1)
+                
+            except Exception as e:
+                print(f"\n    ! 오류 발생: {e}")
+                if "session" in str(e).lower(): return emart_products
+                break
+        print(f" 완료 ({cat_count}개)")
+            
+    return emart_products
+
 def crawl_all():
     print("WebDriver 설정 중...")
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer")
     options.add_argument("window-size=1920x1080")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
@@ -168,59 +266,75 @@ def crawl_all():
     try:
         base_url = "https://m.search.naver.com/search.naver?where=m&sm=mtb_etc&mra=bjZF&qvt=0&query=%ED%8E%B8%EC%9D%98%EC%A0%90%ED%96%89%EC%82%AC"
         main_categories = ["음료", "아이스크림", "과자", "간편식사", "생활용품"]
-        brands = ["GS25", "CU", "세븐일레븐", "이마트24"]
+        brands = ["이마트24", "GS25", "CU", "세븐일레븐"]
         
         for brand_name in brands:
             print(f"\n>>> 브랜드 '{brand_name}' 크롤링 시작")
-            brand_found_in_naver = False
             
+            # 브랜드가 바뀔 때마다 세션을 깨끗하게 유지하기 위해 페이지 새로고침
+            if not safe_get(driver, base_url): continue
+            time.sleep(5) # 네이버 스마트블록 로딩 대기
+
+            if brand_name == "이마트24":
+                products_data.extend(crawl_emart24_official(driver, processed_products))
+                continue
+            
+            brand_found_in_naver = False
             if brand_name != "CU":
-                for main_cat_name in main_categories:
-                    if not safe_get(driver, base_url): break
-                    time.sleep(3)
-                    
-                    # 브랜드 필터 선택
-                    try:
-                        found_f = False
-                        select_el = WebDriverWait(driver, 7).until(EC.presence_of_element_located((By.CSS_SELECTOR, "select.slct")))
-                        select_obj = Select(select_el)
+                # 브랜드 필터 적용 (한 번만 확실하게)
+                if not safe_get(driver, base_url): continue
+                time.sleep(5)
+                
+                try:
+                    found_f = False
+                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "select.slct, a.fds-image-body-basic-chip-anchor")))
+                    select_elements = driver.find_elements(By.CSS_SELECTOR, "select.slct")
+                    if select_elements:
+                        select_obj = Select(select_elements[0])
                         for opt in select_obj.options:
                             if brand_name.lower() in opt.text.lower():
                                 select_obj.select_by_value(opt.get_attribute('value'))
                                 found_f = True; break
-                        if not found_f:
-                            chips = driver.find_elements(By.CSS_SELECTOR, "a.fds-image-body-basic-chip-anchor")
-                            for chip in chips:
-                                if brand_name.lower() in chip.text.lower() or (brand_name == "이마트24" and "24" in chip.text):
-                                    driver.execute_script("arguments[0].click();", chip)
-                                    found_f = True; break
-                        if not found_f: break
-                        
-                        time.sleep(3)
-                        # 카테고리 탭 선택
-                        tab_xpath = "//ul[contains(@class, 'tab_list')]//a[span[contains(text(), '{}')]]".format(main_cat_name[:2])
-                        tab_el = driver.find_element(By.XPATH, tab_xpath)
+                    if not found_f:
+                        chips = driver.find_elements(By.CSS_SELECTOR, "a.fds-image-body-basic-chip-anchor")
+                        for chip in chips:
+                            if brand_name.lower() in chip.text.lower() or (brand_name == "이마트24" and "24" in chip.text):
+                                driver.execute_script("arguments[0].click();", chip)
+                                found_f = True; break
+                    if not found_f: continue
+                    time.sleep(3)
+                except Exception as e:
+                    print(f"    ! '{brand_name}' 필터 선택 실패: {e}")
+                    continue
+
+                # 각 카테고리 순회
+                for main_cat_name in main_categories:
+                    try:
+                        # 카테고리 탭 클릭
+                        tab_xpath = f"//ul[contains(@class, 'tab_list')]//a[span[contains(text(), '{main_cat_name[:2]}')]]"
+                        tab_el = WebDriverWait(driver, 7).until(EC.element_to_be_clickable((By.XPATH, tab_xpath)))
                         driver.execute_script("arguments[0].click();", tab_el)
-                        time.sleep(2)
+                        time.sleep(3)
                         brand_found_in_naver = True
                         
-                        # 데이터 수집 (네이버)
+                        # 해당 카테고리 끝까지 페이징하며 수집
                         while True:
                             try:
-                                WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "ul[role='list'] > li[role='listitem']")))
+                                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "ul[role='list'] > li[role='listitem']")))
                                 products = driver.find_elements(By.CSS_SELECTOR, "ul[role='list'] > li[role='listitem']")
                             except: break
 
                             new_count = 0
                             for product in products:
                                 try:
-                                    name = product.find_element(By.CSS_SELECTOR, "strong.item_name span.name_text").text
+                                    name = product.find_element(By.CSS_SELECTOR, "strong.item_name span.name_text").text.strip()
                                     try: s_brand = product.find_element(By.CSS_SELECTOR, "span.store_info").text or brand_name
                                     except: s_brand = brand_name
+                                    
                                     if (name, s_brand) in processed_products: continue
                                     
                                     img = product.find_element(By.CSS_SELECTOR, "a.thumb img").get_attribute('src')
-                                    event = "N/A"
+                                    event = "할인"
                                     try: event = product.find_element(By.CSS_SELECTOR, "strong.item_name span.ico_event").text
                                     except: pass
                                     
@@ -235,16 +349,19 @@ def crawl_all():
                                     processed_products.add((name, s_brand))
                                     new_count += 1
                                 except: continue
-                            if new_count == 0: break
+                            
+                            # 다음 페이지 버튼 확인 및 클릭
                             try:
-                                curr_txt = driver.find_element(By.CSS_SELECTOR, "strong.cmm_npgs_now._current").text
                                 next_btn = driver.find_element(By.CSS_SELECTOR, "a.cmm_pg_next.on")
+                                curr_txt = driver.find_element(By.CSS_SELECTOR, "strong.cmm_npgs_now._current").text
                                 driver.execute_script("arguments[0].click();", next_btn)
-                                WebDriverWait(driver, 5).until(wait_for_page_number_to_change((By.CSS_SELECTOR, "strong.cmm_npgs_now._current"), curr_txt))
-                            except: break
+                                WebDriverWait(driver, 10).until(wait_for_page_number_to_change((By.CSS_SELECTOR, "strong.cmm_npgs_now._current"), curr_txt))
+                            except:
+                                break # 다음 버튼이 없거나 비활성화 상태면 종료
+                                
                     except Exception as e:
-                        print(f"    ! 네이버 '{brand_name}' 수집 중 오류: {e}")
-                        break
+                        print(f"    ! '{main_cat_name}' 수집 중 오류: {e}")
+                        continue
 
             if brand_name == "CU" and not brand_found_in_naver:
                 products_data.extend(crawl_cu_official(driver, processed_products))
